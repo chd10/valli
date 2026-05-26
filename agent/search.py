@@ -118,6 +118,7 @@ def _has_nonzero_price(v) -> bool:
 def _load() -> pd.DataFrame:
     global _df, _df_noprice
     if _df is None:
+        # col A (0) = condition/metadata, col B (1) = article, col C (2) = price RUB
         df = pd.read_excel(
             PRICE_PATH,
             sheet_name="Глав",
@@ -136,6 +137,9 @@ def _load() -> pd.DataFrame:
         df["article"] = df["article"].str.strip()
         df = df[df["article"] != ""]
         df["condition"] = df["condition"].fillna("").str.strip()
+        # If col A contains a number (e.g. 80000) — treat as empty; real condition
+        # values are text labels like "used", "ref", "likenew", "местно", etc.
+        df.loc[df["condition"].apply(_is_numeric), "condition"] = ""
         df["price"] = df["price"].fillna("")
 
         df["article_lower"] = df["article"].str.lower()

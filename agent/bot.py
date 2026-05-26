@@ -804,6 +804,7 @@ async def cmd_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def handle_ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != MANAGER_CHAT_ID:
+        await update.message.reply_text("Эта команда недоступна.")
         return
     parts = update.message.text.strip().split()
     if len(parts) < 2:

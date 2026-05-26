@@ -1,0 +1,3 @@
+SHELL=/bin/bash
+# 09:00 MSK = 06:00 UTC
+0 6 * * * root . /app/env.sh && python3 /app/agent/update_price.py >> /app/data/update_price.log 2>&1

@@ -11,6 +11,7 @@ import users
 import email_sender
 from search import search, search_containing
 import supplier_requests
+import chat_history
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -170,6 +171,12 @@ def _add_to_history(context: ContextTypes.DEFAULT_TYPE, role: str, content: str)
         context.user_data["history"] = history[-(MAX_HISTORY * 2):]
 
 
+async def _reply(update: Update, user, text: str, **kwargs) -> None:
+    """Send reply to user and log it to chat history file."""
+    await update.message.reply_text(text, **kwargs)
+    chat_history.append_message(user.id, user.username, user.first_name, "out", text)
+
+
 # ---------------------------------------------------------------------------
 # Claude
 # ---------------------------------------------------------------------------
@@ -204,8 +211,24 @@ async def _ask_claude(
 
 
 # ---------------------------------------------------------------------------
-# Manager notification
+# Manager notifications
 # ---------------------------------------------------------------------------
+
+async def _notify_new_user(user, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_link = f"https://t.me/{user.username}" if user.username else f"tg://user?id={user.id}"
+    label = _user_label(user)
+    text = (
+        f"🆕 Новый пользователь!\n\n"
+        f"Имя: {user.first_name or '—'}\n"
+        f"Username: {label}\n"
+        f"ID: {user.id}"
+    )
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Написать клиенту", url=user_link)]])
+    try:
+        await context.bot.send_message(chat_id=MANAGER_CHAT_ID, text=text, reply_markup=keyboard)
+    except Exception:
+        logger.exception("Ошибка уведомления менеджера о новом пользователе")
+
 
 async def _send_manager_notification(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
@@ -259,7 +282,13 @@ async def _inactivity_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
     data = context.job.data
     user_data = data["user_data"]
     user_label = data["user_label"]
+    user_id = data["user_id"]
+    username = data.get("username")
+
     history = user_data.get("history", [])
+    dialog_started_at = user_data.get("dialog_started_at")
+
+    # Email (existing behaviour)
     last_sent = user_data.get("email_sent_at_len", 0)
     if history and len(history) > last_sent:
         user_data["email_sent_at_len"] = len(history)
@@ -269,6 +298,49 @@ async def _inactivity_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             logger.exception("Ошибка email после неактивности для %s", user_label)
 
+    # Dialog summary → manager
+    if history and dialog_started_at:
+        duration = dt.datetime.now() - dialog_started_at
+        total_min = int(duration.total_seconds() // 60)
+        total_sec = int(duration.total_seconds() % 60)
+        duration_str = f"{total_min} мин {total_sec} сек"
+
+        summary = "—"
+        try:
+            resp = await anthropic_client.messages.create(
+                model="claude-opus-4-7",
+                max_tokens=300,
+                system="Ты помощник, кратко резюмируешь диалоги. Отвечай только на русском языке.",
+                messages=list(history) + [{
+                    "role": "user",
+                    "content": (
+                        "Кратко (2-3 предложения) резюмируй этот диалог: "
+                        "о чём говорили, чем интересовался клиент, к чему пришли."
+                    ),
+                }],
+            )
+            summary = resp.content[0].text
+        except Exception:
+            logger.exception("Ошибка генерации резюме диалога для %s", user_label)
+
+        user_link = f"https://t.me/{username}" if username else f"tg://user?id={user_id}"
+        text = (
+            f"📊 Диалог завершён\n\n"
+            f"Пользователь: {user_label}\n"
+            f"Длительность: {duration_str}\n"
+            f"Сообщений: {len(history)}\n\n"
+            f"📝 Резюме:\n{summary}"
+        )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Написать клиенту", url=user_link)]])
+        try:
+            await context.bot.send_message(
+                chat_id=MANAGER_CHAT_ID, text=text, reply_markup=keyboard
+            )
+        except Exception:
+            logger.exception("Ошибка отправки резюме диалога менеджеру для %s", user_label)
+
+    user_data.pop("dialog_started_at", None)
+
 
 def _schedule_inactivity_job(user, user_label: str, context: ContextTypes.DEFAULT_TYPE) -> None:
     job_name = f"inactivity_{user.id}"
@@ -277,7 +349,13 @@ def _schedule_inactivity_job(user, user_label: str, context: ContextTypes.DEFAUL
     context.job_queue.run_once(
         _inactivity_callback,
         when=INACTIVITY_MINUTES * 60,
-        data={"user_data": context.user_data, "user_label": user_label},
+        data={
+            "user_data": context.user_data,
+            "user_label": user_label,
+            "user_id": user.id,
+            "username": user.username,
+            "first_name": user.first_name,
+        },
         name=job_name,
     )
 
@@ -288,15 +366,19 @@ def _schedule_inactivity_job(user, user_label: str, context: ContextTypes.DEFAUL
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
+    first_visit = chat_history.is_new_user(user.id)
     await users.update_user(user)
     context.user_data.clear()
     context.user_data["user_first_name"] = user.first_name
+    context.user_data["dialog_started_at"] = dt.datetime.now()
     user_label = _user_label(user)
-    # Cancel any pending inactivity job
     for job in context.job_queue.get_jobs_by_name(f"inactivity_{user.id}"):
         job.schedule_removal()
+    chat_history.append_message(user.id, user.username, user.first_name, "in", "/start")
+    if first_visit:
+        await _notify_new_user(user, context)
     reply = await _ask_claude("Поздоровайся и кратко расскажи, чем можешь помочь.", context)
-    await update.message.reply_text(reply)
+    await _reply(update, user, reply)
     _schedule_inactivity_job(user, user_label, context)
 
 
@@ -329,6 +411,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("Thanks! 👍")
         return
 
+    # --- Логирование и трекинг нового пользователя ---
+    first_visit = chat_history.is_new_user(user.id)
+    chat_history.append_message(user.id, user.username, user.first_name, "in", query)
+    if first_visit:
+        await _notify_new_user(user, context)
+    if not context.user_data.get("dialog_started_at"):
+        context.user_data["dialog_started_at"] = dt.datetime.now()
+
     # --- Ожидаем реквизиты ---
     if context.user_data.get("awaiting_requisites"):
         context.user_data["requisites"] = query
@@ -337,7 +427,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         reply = "Передал вашу заявку менеджеру — свяжутся в течение рабочего дня."
         _add_to_history(context, "user", query)
         _add_to_history(context, "assistant", reply)
-        await update.message.reply_text(reply)
+        await _reply(update, user, reply)
         await _send_chat_email_now(user_label, context)
         _schedule_inactivity_job(user, user_label, context)
         return
@@ -357,7 +447,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
                 _add_to_history(context, "user", query)
                 _add_to_history(context, "assistant", reply)
-                await update.message.reply_text(reply)
+                await _reply(update, user, reply)
                 _schedule_inactivity_job(user, user_label, context)
                 return
             reply = await _ask_claude(
@@ -368,7 +458,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     "и уточняет детали запроса. Учти эту информацию в ответе."
                 ),
             )
-            await update.message.reply_text(reply)
+            await _reply(update, user, reply)
             _schedule_inactivity_job(user, user_label, context)
             return
         context.user_data.pop("valli_state", None)
@@ -392,11 +482,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             reply = "Передал вашу заявку менеджеру — свяжутся в течение рабочего дня."
             _add_to_history(context, "user", query)
             _add_to_history(context, "assistant", reply)
-            await update.message.reply_text(reply)
+            await _reply(update, user, reply)
             await _send_chat_email_now(user_label, context)
             _schedule_inactivity_job(user, user_label, context)
             return
-        await update.message.reply_text(reply)
+        await _reply(update, user, reply)
         _schedule_inactivity_job(user, user_label, context)
         return
 
@@ -412,21 +502,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             context.user_data["last_articles"] = [f"{selected['article']} — {selected['price']}"]
             _add_to_history(context, "user", query)
             _add_to_history(context, "assistant", price_text)
-            await update.message.reply_text(price_text)
+            await _reply(update, user, price_text)
             if selected.get("stale"):
                 req_id = await _request_supplier_price(selected["article"], user, user_label, context)
                 if req_id:
-                    await update.message.reply_text(
-                        "Направил запрос менеджеру — уточняю актуальную цену, отвечу в течение рабочего дня."
-                    )
+                    stale_msg = "Направил запрос менеджеру — уточняю актуальную цену, отвечу в течение рабочего дня."
+                    await _reply(update, user, stale_msg)
             context.user_data["valli_state"] = {"mode": "awaiting_details", "article": selected["article"]}
-            await update.message.reply_text(_OPTIONAL_QUESTIONS)
+            await _reply(update, user, _OPTIONAL_QUESTIONS)
         else:
             lines = [f"— {c['article']} ({c['condition']})" for c in candidates]
             reply = "Не смог распознать выбор. Введите артикул из списка:\n\n" + "\n".join(lines)
             _add_to_history(context, "user", query)
             _add_to_history(context, "assistant", reply)
-            await update.message.reply_text(reply)
+            await _reply(update, user, reply)
         _schedule_inactivity_job(user, user_label, context)
         return
 
@@ -451,7 +540,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             }
             _add_to_history(context, "user", query)
             _add_to_history(context, "assistant", reply)
-            await update.message.reply_text(reply)
+            await _reply(update, user, reply)
             _schedule_inactivity_job(user, user_label, context)
             return
 
@@ -468,18 +557,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 context.user_data["last_articles"] = [f"{item['article']} — {item['price']}"]
                 _add_to_history(context, "user", query)
                 _add_to_history(context, "assistant", price_text)
-                await update.message.reply_text(price_text)
+                await _reply(update, user, price_text)
                 if item.get("stale"):
                     req_id = await _request_supplier_price(item["article"], user, user_label, context)
                     if req_id:
-                        await update.message.reply_text(
-                            "Направил запрос менеджеру — уточняю актуальную цену, отвечу в течение рабочего дня."
-                        )
+                        stale_msg = "Направил запрос менеджеру — уточняю актуальную цену, отвечу в течение рабочего дня."
+                        await _reply(update, user, stale_msg)
                 context.user_data["valli_state"] = {"mode": "awaiting_details", "article": item["article"]}
-                await update.message.reply_text(_OPTIONAL_QUESTIONS)
+                await _reply(update, user, _OPTIONAL_QUESTIONS)
             else:
                 reply = await _ask_claude(query, context)
-                await update.message.reply_text(reply)
+                await _reply(update, user, reply)
             _schedule_inactivity_job(user, user_label, context)
             return
 
@@ -496,7 +584,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
                 _add_to_history(context, "user", query)
                 _add_to_history(context, "assistant", reply)
-                await update.message.reply_text(reply)
+                await _reply(update, user, reply)
                 try:
                     await context.bot.send_message(
                         chat_id=MANAGER_CHAT_ID,
@@ -519,9 +607,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             context.user_data["last_articles"] = [f"{r['article']} — {r['price']}" for r in results]
             _add_to_history(context, "user", query)
             _add_to_history(context, "assistant", reply)
-            await update.message.reply_text(reply)
+            await _reply(update, user, reply)
             context.user_data["valli_state"] = {"mode": "awaiting_details", "article": first["article"]}
-            await update.message.reply_text(_OPTIONAL_QUESTIONS)
+            await _reply(update, user, _OPTIONAL_QUESTIONS)
             _schedule_inactivity_job(user, user_label, context)
             return
 
@@ -545,12 +633,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
                 _add_to_history(context, "user", query)
                 _add_to_history(context, "assistant", reply)
-                await update.message.reply_text(reply)
+                await _reply(update, user, reply)
                 _schedule_inactivity_job(user, user_label, context)
                 return
         reply = await _ask_claude(query, context)
 
-    await update.message.reply_text(reply)
+    await _reply(update, user, reply)
     _schedule_inactivity_job(user, user_label, context)
 
 
@@ -619,6 +707,32 @@ async def cmd_suppliers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 f"({r['created_at'][:10]})  {status_label}"
             )
     await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != MANAGER_CHAT_ID:
+        return
+    args = context.args or []
+    if not args:
+        await update.message.reply_text("Формат: /chat <user_id>")
+        return
+    try:
+        target_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("ID должен быть числом")
+        return
+    messages = chat_history.get_last_messages(target_id, 20)
+    if not messages:
+        await update.message.reply_text(f"Чат с пользователем {target_id} не найден")
+        return
+    lines = [f"💬 Последние {len(messages)} сообщений (ID {target_id}):", ""]
+    for m in messages:
+        arrow = "→" if m["direction"] == "in" else "←"
+        lines.append(f"[{m['date']} {m['time']}] {arrow} {m['text'][:200]}")
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:4000] + "\n...(обрезано)"
+    await update.message.reply_text(text)
 
 
 # ---------------------------------------------------------------------------
@@ -745,6 +859,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("price", cmd_price))
     app.add_handler(CommandHandler("suppliers", cmd_suppliers))
+    app.add_handler(CommandHandler("chat", cmd_chat))
     app.add_handler(MessageHandler(filters.Regex(r"^/ask_"), handle_ask_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     # 09:00 MSK = 06:00 UTC

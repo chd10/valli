@@ -522,14 +522,58 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Check stock first — immediate availability beats price search
         stock_hit = stock_search.search_stock(query)
         if stock_hit:
-            reply = (
-                f"✅ Есть на складе eDiscom (Москва): {stock_hit['article']}, "
-                f"{stock_hit['qty']} шт. Срок поставки: 2-3 дня. "
-                f"Цену уточню у менеджера."
-            )
+            # Also look up price from price list
+            price_item = None
+            price_candidates = search_containing(query)
+            if price_candidates:
+                if len(price_candidates) == 1:
+                    search_target = price_candidates[0]["article"]
+                else:
+                    q_lower = query.lower()
+                    search_target = next(
+                        (c["article"] for c in price_candidates if c["article"].lower() == q_lower),
+                        price_candidates[0]["article"],
+                    )
+                precise = search(search_target)
+                if precise and not precise[0].get("fuzzy") and not precise[0].get("no_price"):
+                    price_item = precise[0]
+
+            if price_item:
+                reply = (
+                    f"✅ Склад Москва: {stock_hit['qty']} шт, поставка 2-3 дня\n"
+                    f"💰 Цена: {price_item['price']}"
+                )
+                if price_item.get("stale"):
+                    reply += "\n⚠️ Цена устаревшая — запрошу актуальную у поставщиков."
+                context.user_data["last_articles"] = [f"{price_item['article']} — {price_item['price']}"]
+            else:
+                reply = (
+                    f"✅ Склад Москва: {stock_hit['qty']} шт, поставка 2-3 дня\n"
+                    f"💰 Цена уточняется"
+                )
+
             _add_to_history(context, "user", query)
             _add_to_history(context, "assistant", reply)
             await _reply(update, user, reply)
+
+            if price_item and price_item.get("stale"):
+                req_id = await _request_supplier_price(price_item["article"], user, user_label, context)
+                if req_id:
+                    await _reply(update, user, "Направил запрос менеджеру — уточняю актуальную цену, отвечу в течение рабочего дня.")
+            elif not price_item:
+                try:
+                    await context.bot.send_message(
+                        chat_id=MANAGER_CHAT_ID,
+                        text=(
+                            f"⚠️ Товар на складе, цены нет в прайсе\n\n"
+                            f"Артикул: {stock_hit['article']}\n"
+                            f"Клиент: {user_label} (ID: {user.id})\n\n"
+                            f"На складе: {stock_hit['qty']} шт. Нужна цена."
+                        ),
+                    )
+                except Exception:
+                    logger.exception("Ошибка уведомления менеджера (склад без цены)")
+
             _schedule_inactivity_job(user, user_label, context)
             return
 

@@ -388,7 +388,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     user = update.effective_user
     logger.info("Запрос от %s (%s): %s", user.id, user.username, query)
-    await users.update_user(user)
+    is_new = await users.update_user(user)
     context.user_data["user_first_name"] = user.first_name
     user_label = _user_label(user)
 

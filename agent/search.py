@@ -283,6 +283,7 @@ def search(query: str, score_cutoff: int = 65) -> list[dict]:
     # Exact match found — return only those, no fuzzy
     if exact:
         exact.sort(key=lambda r: r.pop("_sort_key"))
+        logger.info("search(%r) → exact match: %s", query, [r["article"] for r in exact])
         return exact
 
     # Article exists but price is empty/zero — report as no_price

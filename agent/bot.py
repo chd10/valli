@@ -519,6 +519,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # --- Поиск по артикулу ---
     if _looks_like_article(query):
+        # Check stock first — immediate availability beats price search
+        stock_hit = stock_search.search_stock(query)
+        if stock_hit:
+            reply = (
+                f"✅ Есть на складе eDiscom (Москва): {stock_hit['article']}, "
+                f"{stock_hit['qty']} шт. Срок поставки: 2-3 дня. "
+                f"Цену уточню у менеджера."
+            )
+            _add_to_history(context, "user", query)
+            _add_to_history(context, "assistant", reply)
+            await _reply(update, user, reply)
+            _schedule_inactivity_job(user, user_label, context)
+            return
+
         # Always check substring matches first — even if exact match exists
         candidates = search_containing(query)
 

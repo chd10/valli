@@ -391,7 +391,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         _add_to_history(context, "assistant", reply)
     else:
         reply = await _ask_claude("Поздоровайся и кратко расскажи, чем можешь помочь.", context)
-    await _reply(update, user, reply)
+    await _reply(update, user, reply + _CONFIDENTIALITY_NOTE)
     _schedule_inactivity_job(user, user_label, context)
 
 

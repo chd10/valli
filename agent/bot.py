@@ -752,6 +752,7 @@ _STATUS_LABELS = {
 
 async def cmd_suppliers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != MANAGER_CHAT_ID:
+        await update.message.reply_text("Эта команда недоступна.")
         return
     suppliers = supplier_requests.load_suppliers()
     active = supplier_requests.get_all_active()

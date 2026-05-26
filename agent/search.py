@@ -328,4 +328,8 @@ def search(query: str, score_cutoff: int = 65) -> list[dict]:
                 seen.add(i)
                 fuzzy.append(make_row(i, int(score), True))
 
+    if fuzzy:
+        logger.info("search(%r) → fuzzy: %s", query, [r["article"] for r in fuzzy])
+    else:
+        logger.info("search(%r) → no results", query)
     return fuzzy

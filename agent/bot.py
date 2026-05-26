@@ -563,7 +563,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         stale_msg = "Направил запрос менеджеру — уточняю актуальную цену, отвечу в течение рабочего дня."
                         await _reply(update, user, stale_msg)
                 context.user_data["valli_state"] = {"mode": "awaiting_details", "article": item["article"]}
-                await _reply(update, user, _OPTIONAL_QUESTIONS)
             else:
                 reply = await _ask_claude(query, context)
                 await _reply(update, user, reply)

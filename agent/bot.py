@@ -366,8 +366,7 @@ def _schedule_inactivity_job(user, user_label: str, context: ContextTypes.DEFAUL
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    first_visit = chat_history.is_new_user(user.id)
-    await users.update_user(user)
+    is_new = await users.update_user(user)
     context.user_data.clear()
     context.user_data["user_first_name"] = user.first_name
     context.user_data["dialog_started_at"] = dt.datetime.now()
@@ -375,7 +374,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     for job in context.job_queue.get_jobs_by_name(f"inactivity_{user.id}"):
         job.schedule_removal()
     chat_history.append_message(user.id, user.username, user.first_name, "in", "/start")
-    if first_visit:
+    if is_new:
         await _notify_new_user(user, context)
     reply = await _ask_claude("Поздоровайся и кратко расскажи, чем можешь помочь.", context)
     await _reply(update, user, reply)

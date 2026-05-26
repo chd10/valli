@@ -248,6 +248,7 @@ def search(query: str, score_cutoff: int = 65) -> list[dict]:
     q = query.strip()
     q_lower = q.lower()
     q_norm = _normalize(q)
+    logger.info("search(%r)", query)
 
     seen: set[int] = set()
 

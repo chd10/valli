@@ -1,5 +1,6 @@
 import os
 import re
+import logging
 import warnings
 from datetime import date
 
@@ -8,6 +9,8 @@ import pandas as pd
 from rapidfuzz import fuzz, process
 
 PRICE_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "price.xlsx")
+
+logger = logging.getLogger(__name__)
 
 _df: pd.DataFrame | None = None
 _df_noprice: pd.DataFrame | None = None

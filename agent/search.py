@@ -181,6 +181,8 @@ def search_containing(query: str, limit: int = 20) -> list[dict]:
                 "article": art,
                 "condition": _format_condition_short(row["condition"]),
             })
+    logger.info("search_containing(%r) → %d candidates: %s",
+                query, len(result), [r["article"] for r in result])
     return result
 
 

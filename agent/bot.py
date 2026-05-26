@@ -509,7 +509,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     stale_msg = "Направил запрос менеджеру — уточняю актуальную цену, отвечу в течение рабочего дня."
                     await _reply(update, user, stale_msg)
             context.user_data["valli_state"] = {"mode": "awaiting_details", "article": selected["article"]}
-            await _reply(update, user, _OPTIONAL_QUESTIONS)
         else:
             lines = [f"— {c['article']} ({c['condition']})" for c in candidates]
             reply = "Не смог распознать выбор. Введите артикул из списка:\n\n" + "\n".join(lines)

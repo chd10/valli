@@ -12,6 +12,7 @@ import email_sender
 from search import search, search_containing
 import supplier_requests
 import chat_history
+import stock_search
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)

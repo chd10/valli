@@ -44,3 +44,19 @@ async def update_user(user: User) -> bool:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
         return is_new
+
+
+async def set_source(user_id: int, source: str) -> None:
+    """Set source field for user in users.json (e.g. 'email')."""
+    async with _lock:
+        try:
+            with open(USERS_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            data = {}
+        uid = str(user_id)
+        if uid in data and not data[uid].get("source"):
+            data[uid]["source"] = source
+            with open(USERS_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            logger.info("Источник пользователя %s: %s", user_id, source)

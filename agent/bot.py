@@ -607,7 +607,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             _add_to_history(context, "assistant", reply)
             await _reply(update, user, reply)
             context.user_data["valli_state"] = {"mode": "awaiting_details", "article": first["article"]}
-            await _reply(update, user, _OPTIONAL_QUESTIONS)
             _schedule_inactivity_job(user, user_label, context)
             return
 

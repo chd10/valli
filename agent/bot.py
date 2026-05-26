@@ -859,8 +859,9 @@ async def _send_queued_requests(context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------------------------------------------------------------------------
 
 def _on_reload_signal(signum, frame):
-    logger.info("SIGUSR1: перезагрузка прайса")
+    logger.info("SIGUSR1: перезагрузка прайса и склада")
     search.reload()
+    stock_search.reload()
 
 
 def main() -> None:

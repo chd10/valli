@@ -374,10 +374,16 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_label = _user_label(user)
     for job in context.job_queue.get_jobs_by_name(f"inactivity_{user.id}"):
         job.schedule_removal()
-    chat_history.append_message(user.id, user.username, user.first_name, "in", "/start")
+    start_param = context.args[0] if context.args else None
+    chat_history.append_message(user.id, user.username, user.first_name, "in", f"/start {start_param or ''}".strip())
     if is_new:
         await _notify_new_user(user, context)
-    reply = await _ask_claude("Поздоровайся и кратко расскажи, чем можешь помочь.", context)
+    if start_param == "email_utm":
+        await users.set_source(user.id, "email")
+        reply = "Здравствуйте! Вижу вы пришли из нашей рассылки. Напишите артикул оборудования — найду цену и наличие."
+        _add_to_history(context, "assistant", reply)
+    else:
+        reply = await _ask_claude("Поздоровайся и кратко расскажи, чем можешь помочь.", context)
     await _reply(update, user, reply)
     _schedule_inactivity_job(user, user_label, context)
 

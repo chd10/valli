@@ -411,9 +411,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     # --- Логирование и трекинг нового пользователя ---
-    first_visit = chat_history.is_new_user(user.id)
     chat_history.append_message(user.id, user.username, user.first_name, "in", query)
-    if first_visit:
+    if is_new:
         await _notify_new_user(user, context)
     if not context.user_data.get("dialog_started_at"):
         context.user_data["dialog_started_at"] = dt.datetime.now()

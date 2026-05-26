@@ -708,6 +708,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != MANAGER_CHAT_ID:
+        await update.message.reply_text("Эта команда недоступна.")
         return
     args = context.args or []
     if len(args) < 3:

@@ -12,7 +12,8 @@ USERS_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "users.json")
 _lock = asyncio.Lock()
 
 
-async def update_user(user: User) -> None:
+async def update_user(user: User) -> bool:
+    """Update users.json. Returns True if this is the user's first ever message."""
     async with _lock:
         try:
             with open(USERS_PATH, encoding="utf-8") as f:
@@ -32,10 +33,14 @@ async def update_user(user: User) -> None:
                 "last_seen": now,
             }
             logger.info("Новый пользователь: %s (%s)", user.id, user.username)
+            is_new = True
         else:
             data[uid]["last_seen"] = now
             data[uid]["username"] = user.username
             data[uid]["first_name"] = user.first_name
+            is_new = False
 
         with open(USERS_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
+        return is_new

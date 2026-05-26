@@ -290,10 +290,12 @@ def search(query: str, score_cutoff: int = 65) -> list[dict]:
     np = _load_noprice()
     for idx in np[np["article_lower"] == q_lower].index:
         row = np.iloc[int(idx)]
+        logger.info("search(%r) → no_price: %s", query, row["article"])
         return [{"article": row["article"], "no_price": True, "fuzzy": False}]
     if q_norm:
         for idx in np[np["article_norm"] == q_norm].index:
             row = np.iloc[int(idx)]
+            logger.info("search(%r) → no_price (norm): %s", query, row["article"])
             return [{"article": row["article"], "no_price": True, "fuzzy": False}]
 
     # No exact match — fuzzy with hard limit of 3

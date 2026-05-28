@@ -96,12 +96,45 @@ def _parse_date(s: str) -> datetime | None:
     return None
 
 
+_MONTH_RE = re.compile(
+    r"\b(January|February|March|April|May|June|July|August|September|October|November|December)"
+    r"\.?\s+\d{1,2},?\s+\d{4}\b",
+    re.IGNORECASE,
+)
+
+
+def _dates_from_text(text: str) -> list[datetime]:
+    found = []
+    for m in _MONTH_RE.finditer(text):
+        d = _parse_date(m.group())
+        if d:
+            found.append(d)
+    return found
+
+
 def _extract_eos_date(html: str) -> datetime | None:
-    """Extract the earliest End-of-Sale date from an HTML page."""
-    text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+    """
+    Extract End-of-Sale date from a Cisco EoL bulletin HTML page.
+
+    Cisco bulletins have a table row like:
+      "End-of-Sale Date: ... description ... November 2, 2020"
+    The actual date is the LAST date in that <tr> text.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Strategy 1: find <tr> labelled "End-of-Sale Date" → last date in that row
+    for tr in soup.find_all("tr"):
+        row_text = tr.get_text(" ", strip=True)
+        if re.search(r"end[- ]of[- ]sale\s+date", row_text, re.IGNORECASE):
+            dates = _dates_from_text(row_text)
+            if dates:
+                return dates[-1]  # last date = the actual EoS date
+
+    # Strategy 2: regex patterns on full page text
+    full_text = soup.get_text(" ", strip=True)
     found: list[datetime] = []
     for pat in _EOS_PATTERNS:
-        for m in re.finditer(pat, text, re.IGNORECASE):
+        for m in re.finditer(pat, full_text, re.IGNORECASE):
             d = _parse_date(m.group(1))
             if d:
                 found.append(d)
@@ -137,44 +170,73 @@ def _resolve_ddg_href(href: str) -> str:
     return href
 
 
+def _cisco_html_url(url: str) -> str:
+    """Convert a Cisco PDF bulletin URL to its HTML equivalent."""
+    if url.lower().endswith(".pdf"):
+        return url[:-4] + ".html"
+    return url
+
+
 def _ddg_find_cisco_eol(article: str, session: requests.Session) -> str | None:
     """
     Search DuckDuckGo HTML for a Cisco EoL bulletin URL or date snippet.
     Returns either:
-      - a full https:// URL to a Cisco EoL bulletin page
+      - a full https:// URL to a Cisco EoL bulletin page (HTML)
       - "__date__YYYY-MM-DD" if a date was found directly in the snippet
       - None if nothing found
     """
-    q = f"site:cisco.com {article} end-of-sale eos-eol-notice"
-    url = f"https://html.duckduckgo.com/html/?q={quote(q)}"
-    try:
-        r = session.get(url, timeout=15)
-        if r.status_code != 200:
-            return None
-        soup = BeautifulSoup(r.text, "html.parser")
+    # Try two queries: specific (with eos-eol-notice) then broader
+    queries = [
+        f"site:cisco.com {article} end-of-sale eos-eol-notice",
+        f"site:cisco.com {article} end-of-sale",
+    ]
+    for q in queries:
+        url = f"https://html.duckduckgo.com/html/?q={quote(q)}"
+        try:
+            r = session.get(url, timeout=15)
+            if r.status_code == 429:
+                logger.warning("  DDG rate limit — sleeping 10s")
+                time.sleep(10)
+                continue
+            if r.status_code != 200:
+                continue
+            soup = BeautifulSoup(r.text, "html.parser")
 
-        # Try to extract date directly from result snippets (fast path)
-        for snippet in soup.select(".result__snippet, .result__body, .result__a"):
-            d = _extract_eos_date(str(snippet))
-            if d:
-                return f"__date__{d.strftime('%Y-%m-%d')}"
+            # Try to extract date directly from result snippets (fast path)
+            for snippet in soup.select(".result__snippet, .result__body, .result__a"):
+                d = _extract_eos_date(str(snippet))
+                if d:
+                    return f"__date__{d.strftime('%Y-%m-%d')}"
 
-        # Look for Cisco EoL bulletin links
-        for a_tag in soup.find_all("a", href=True):
-            real = _resolve_ddg_href(a_tag["href"])
-            if (
-                "cisco.com" in real
-                and "eos-eol" in real.lower()
-                and real.startswith("http")
-            ):
-                return real
-    except Exception as e:
-        logger.warning("  DDG error for %s: %s", article, e)
+            # Look for Cisco EoL bulletin links (PDF or HTML)
+            for a_tag in soup.find_all("a", href=True):
+                real = _resolve_ddg_href(a_tag["href"])
+                if (
+                    "cisco.com" in real
+                    and "eos-eol" in real.lower()
+                    and real.startswith("http")
+                ):
+                    return _cisco_html_url(real)
+
+            time.sleep(PAUSE)
+        except Exception as e:
+            logger.warning("  DDG error for %s: %s", article, e)
     return None
 
 # ---------------------------------------------------------------------------
 # Main lookup
 # ---------------------------------------------------------------------------
+
+def _try_scrape_url(url: str, session: requests.Session) -> datetime | None:
+    """Fetch a URL and extract EoS date. Returns None on any failure."""
+    try:
+        r = session.get(url, timeout=15, allow_redirects=True)
+        if r.status_code == 200 and "html" in r.headers.get("content-type", ""):
+            return _extract_eos_date(r.text)
+    except Exception as e:
+        logger.warning("  Fetch failed %s: %s", url, e)
+    return None
+
 
 def find_eol_date(article: str, session: requests.Session) -> datetime | None:
     """Return End-of-Sale date for the article, or None if active / not found."""
@@ -200,28 +262,31 @@ def find_eol_date(article: str, session: requests.Session) -> datetime | None:
     result = _ddg_find_cisco_eol(article, session)
     time.sleep(PAUSE)
 
-    if not result:
-        return None
-
-    # Fast path: date was in the DDG snippet
-    if result.startswith("__date__"):
-        d = _parse_date(result[8:])
-        if d:
-            logger.info("  → date from DDG snippet: %s", d.strftime("%d.%m.%Y"))
-        return d
-
-    # Step 3: Scrape the Cisco EoL bulletin page
-    logger.info("  → bulletin found: %s", result)
-    try:
-        r = session.get(result, timeout=15, allow_redirects=True)
-        if r.status_code == 200:
-            d = _extract_eos_date(r.text)
+    if result:
+        if result.startswith("__date__"):
+            d = _parse_date(result[8:])
             if d:
-                logger.info("  → date from bulletin page: %s", d.strftime("%d.%m.%Y"))
-                return d
-    except Exception as e:
-        logger.warning("  Failed to scrape bulletin %s: %s", result, e)
-    time.sleep(PAUSE)
+                logger.info("  → date from DDG snippet: %s", d.strftime("%d.%m.%Y"))
+            return d
+        logger.info("  → bulletin found: %s", result)
+        d = _try_scrape_url(result, session)
+        if d:
+            logger.info("  → date from bulletin page: %s", d.strftime("%d.%m.%Y"))
+            return d
+        time.sleep(PAUSE)
+
+    # Step 3: Cisco EoL listing search (sometimes server-side rendered)
+    try:
+        listing_url = (
+            f"https://www.cisco.com/c/en/us/products/eos-eol-listing.html"
+            f"?type=All&q={quote(article)}&pageSize=5&offset=0"
+        )
+        d = _try_scrape_url(listing_url, session)
+        if d:
+            logger.info("  → date from Cisco listing: %s", d.strftime("%d.%m.%Y"))
+            return d
+    except Exception:
+        pass
 
     return None
 

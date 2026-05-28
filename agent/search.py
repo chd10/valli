@@ -93,6 +93,19 @@ def _is_stale(comment: str | None) -> bool:
     return d < _stale_cutoff()
 
 
+def _format_excel_date(val) -> str | None:
+    """Convert pandas date string from Excel to DD.MM.YYYY, or None if empty."""
+    s = str(val).strip() if val is not None else ""
+    if not s or s.lower() in ("nan", "none", "nat", ""):
+        return None
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", s)
+    if m:
+        return f"{m.group(3)}.{m.group(2)}.{m.group(1)}"
+    if re.match(r"^\d{2}\.\d{2}\.\d{4}$", s):
+        return s
+    return s
+
+
 def _load_comments() -> list[str | None]:
     """Read comments from column K (index 10) starting from row 3."""
     with warnings.catch_warnings():
@@ -118,16 +131,16 @@ def _has_nonzero_price(v) -> bool:
 def _load() -> pd.DataFrame:
     global _df, _df_noprice
     if _df is None:
-        # col A (0) = condition/metadata, col B (1) = article, col C (2) = price RUB
+        # A(0)=кондиция, B(1)=EoL дата, C(2)=артикул, D(3)=цена руб, M(12)=Обновлено
         df = pd.read_excel(
             PRICE_PATH,
             sheet_name="Глав",
             header=None,
             skiprows=2,
-            usecols=[0, 1, 2],
+            usecols=[0, 1, 2, 3, 12],
             dtype=str,
         )
-        df.columns = ["condition", "article", "price"]
+        df.columns = ["condition", "eol", "article", "price", "updated"]
 
         comments = _load_comments()
         n = len(df)
@@ -141,6 +154,8 @@ def _load() -> pd.DataFrame:
         # values are text labels like "used", "ref", "likenew", "местно", etc.
         df.loc[df["condition"].apply(_is_numeric), "condition"] = ""
         df["price"] = df["price"].fillna("")
+        df["eol"] = df["eol"].apply(_format_excel_date).fillna("")
+        df["updated"] = df["updated"].apply(_format_excel_date).fillna("")
 
         df["article_lower"] = df["article"].str.lower()
         df["article_norm"] = df["article_lower"].apply(_normalize)
@@ -261,6 +276,9 @@ def search(query: str, score_cutoff: int = 65) -> list[dict]:
             "score": score,
             "stale": bool(row["stale"]),
             "fuzzy": fuzzy,
+            "is_used": row["condition"].lower().strip() == "used",
+            "eol": row["eol"],
+            "updated": row["updated"],
             "_sort_key": _condition_sort_key(row["condition"]),
         }
 

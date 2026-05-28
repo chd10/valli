@@ -65,6 +65,11 @@ _STALE_TRIGGER_RE = re.compile(
     re.IGNORECASE,
 )
 
+_YES_RE = re.compile(
+    r"\b(да\b|yes\b|хочу\b|ок\b|окей|конечно|подберите|подбери|замен[ую])\b",
+    re.IGNORECASE,
+)
+
 MAX_HISTORY = 10
 
 _CONFIDENTIALITY_NOTE = (
@@ -93,15 +98,23 @@ def _is_purchase_intent(text: str) -> bool:
     return bool(_PURCHASE_RE.search(text))
 
 
-def _format_result(item: dict) -> str:
+def _format_result(item: dict, offer_replacement: bool = True) -> str:
     text = (
         f"Артикул: {item['article']}\n"
         f"Кондиция: {item['condition']}\n"
         f"Цена: {item['price']}\n"
         f"Срок поставки: 4–5 недель."
     )
+    if item.get("is_used"):
+        text += "\n♻️ Б/У товар"
     if item.get("stale"):
         text += "\n⚠️ Цена устаревшая — запрошу актуальную у поставщиков."
+    if item.get("updated"):
+        text += f"\n🗓 Цена обновлена: {item['updated']}"
+    if item.get("eol"):
+        text += f"\n⚠️ Товар снят с производства с {item['eol']}"
+        if offer_replacement:
+            text += "\nХотите подобрать замену?"
     return text
 
 
@@ -476,6 +489,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.user_data.pop("valli_state", None)
         # Fall through to purchase intent check or article search
 
+    # --- Ожидаем ответ "да/нет" на предложение подобрать замену (EoL) ---
+    valli_state = context.user_data.get("valli_state")
+    if valli_state and valli_state.get("mode") == "awaiting_replacement":
+        article = valli_state.get("article", "")
+        context.user_data.pop("valli_state", None)
+        if _YES_RE.search(query):
+            prefix = article.rsplit("-", 1)[0] if "-" in article else article
+            alts = search_containing(prefix, limit=8)
+            alts = [a for a in alts if a["article"] != article]
+            if alts:
+                lines = [f"— {a['article']} ({a['condition']})" for a in alts[:5]]
+                reply = (
+                    f"Аналоги для замены {article}:\n\n"
+                    + "\n".join(lines)
+                    + "\n\nУточните нужный артикул — проверю цену."
+                )
+            else:
+                reply = (
+                    f"Похожих артикулов в прайсе не нашёл. "
+                    f"Могу запросить альтернативы у поставщика — напишите, если нужно."
+                )
+            _add_to_history(context, "user", query)
+            _add_to_history(context, "assistant", reply)
+            await _reply(update, user, reply)
+            _schedule_inactivity_job(user, user_label, context)
+            return
+        # Не "да" — обрабатываем как обычное сообщение (fall through)
+
     # --- Готовность к покупке ---
     if _is_purchase_intent(query):
         context.user_data.pop("valli_state", None)
@@ -520,7 +561,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 if req_id:
                     stale_msg = "Направил запрос менеджеру — уточняю актуальную цену, отвечу в течение рабочего дня."
                     await _reply(update, user, stale_msg)
-            context.user_data["valli_state"] = {"mode": "awaiting_details", "article": selected["article"]}
+            _mode = "awaiting_replacement" if selected.get("eol") else "awaiting_details"
+            context.user_data["valli_state"] = {"mode": _mode, "article": selected["article"]}
         else:
             lines = [f"— {c['article']} ({c['condition']})" for c in candidates]
             reply = "Не смог распознать выбор. Введите артикул из списка:\n\n" + "\n".join(lines)
@@ -556,8 +598,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     f"✅ Склад Москва: {stock_hit['qty']} шт, поставка 2-3 дня\n"
                     f"💰 Цена: {price_item['price']}"
                 )
+                if price_item.get("is_used"):
+                    reply += "\n♻️ Б/У товар"
                 if price_item.get("stale"):
                     reply += "\n⚠️ Цена устаревшая — запрошу актуальную у поставщиков."
+                if price_item.get("updated"):
+                    reply += f"\n🗓 Цена обновлена: {price_item['updated']}"
+                if price_item.get("eol"):
+                    reply += f"\n⚠️ Товар снят с производства с {price_item['eol']}\nХотите подобрать замену?"
                 context.user_data["last_articles"] = [f"{price_item['article']} — {price_item['price']}"]
             else:
                 reply = (
@@ -568,6 +616,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             _add_to_history(context, "user", query)
             _add_to_history(context, "assistant", reply)
             await _reply(update, user, reply)
+
+            if price_item and price_item.get("eol"):
+                context.user_data["valli_state"] = {"mode": "awaiting_replacement", "article": price_item["article"]}
 
             if price_item and price_item.get("stale"):
                 req_id = await _request_supplier_price(price_item["article"], user, user_label, context)
@@ -632,7 +683,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     if req_id:
                         stale_msg = "Направил запрос менеджеру — уточняю актуальную цену, отвечу в течение рабочего дня."
                         await _reply(update, user, stale_msg)
-                context.user_data["valli_state"] = {"mode": "awaiting_details", "article": item["article"]}
+                _mode = "awaiting_replacement" if item.get("eol") else "awaiting_details"
+                context.user_data["valli_state"] = {"mode": _mode, "article": item["article"]}
             else:
                 reply = await _ask_claude(query, context)
                 await _reply(update, user, reply)
@@ -668,8 +720,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 _schedule_inactivity_job(user, user_label, context)
                 return
 
-            # Fuzzy fallback — show with prices
-            parts = [_format_result(item) for item in results]
+            # Fuzzy fallback — show with prices (no replacement offer for fuzzy)
+            parts = [_format_result(item, offer_replacement=False) for item in results]
             body = "\n\n".join(parts)
             reply = "Точного совпадения не нашёл. Возможно, вы имели в виду:\n\n" + body
             context.user_data["last_articles"] = [f"{r['article']} — {r['price']}" for r in results]

@@ -111,6 +111,10 @@ async def mark_request(user_id: int, text: str) -> None:
         data[uid]["last_request_text"] = text[:500]
         data[uid]["responded"] = False
         data[uid].pop("last_alert_sent", None)
+        # Reset time-based touchpoints on new request; keep monthly ones
+        existing = data[uid].get("touchpoints", [])
+        data[uid]["touchpoints"] = [tp for tp in existing if tp.startswith("monday_")]
+        data[uid].pop("touchpoint_price_snapshot", None)
         with open(USERS_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -144,6 +148,41 @@ async def get_unresponded_users() -> list:
         if not u.get("responded", True) and u.get("last_request_time"):
             result.append({**u, "_uid": uid})
     return result
+
+
+async def add_touchpoint(user_id: int, tp_type: str) -> None:
+    """Append touchpoint type to user's touchpoints list (idempotent)."""
+    async with _lock:
+        try:
+            with open(USERS_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            data = {}
+        uid = str(user_id)
+        if uid not in data:
+            return
+        tps = data[uid].get("touchpoints", [])
+        if tp_type not in tps:
+            tps.append(tp_type)
+            data[uid]["touchpoints"] = tps
+            with open(USERS_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+async def save_price_snapshot(user_id: int, article: str, price: str) -> None:
+    """Save article price snapshot for day3 touchpoint comparison."""
+    async with _lock:
+        try:
+            with open(USERS_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            data = {}
+        uid = str(user_id)
+        if uid not in data:
+            return
+        data[uid]["touchpoint_price_snapshot"] = {"article": article, "price": price}
+        with open(USERS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 async def update_last_alert(user_id: int) -> None:

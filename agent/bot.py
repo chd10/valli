@@ -16,6 +16,7 @@ from search import search, search_containing
 import supplier_requests
 import chat_history
 import stock_search
+import touchpoints
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -1231,6 +1232,12 @@ def main() -> None:
         _check_unanswered_clients,
         interval=15 * 60,
         first=15 * 60,
+    )
+    # Каждый час: персональные касания клиентов (day1/day3/week1/week4/monday)
+    app.job_queue.run_repeating(
+        touchpoints.run_touchpoints_job,
+        interval=60 * 60,
+        first=60 * 60,
     )
     logger.info("Бот Валли запущен")
     app.run_polling()

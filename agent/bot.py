@@ -3,6 +3,9 @@ import re
 import signal
 import logging
 import datetime as dt
+from io import BytesIO
+import openpyxl
+from openpyxl.utils import get_column_letter
 from anthropic import AsyncAnthropic
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, CallbackQueryHandler, ContextTypes, filters
@@ -134,6 +137,23 @@ _SUPPLIER_REQUEST_TEXT = (
     "PRICE: [amount] USD/RMB\n"
     "LEAD TIME: [days/weeks]"
 )
+
+
+def _parse_price_amount(price_str: str) -> float:
+    """Extract numeric rubles from strings like '15 000 руб. с НДС'."""
+    try:
+        left = price_str.split("руб")[0]
+        digits = re.sub(r"[^\d]", "", left)
+        return float(digits) if digits else 0.0
+    except Exception:
+        return 0.0
+
+
+def _track_article(context: ContextTypes.DEFAULT_TYPE, article: str, price_str: str) -> None:
+    """Accumulate article+price into per-dialog tracking dict."""
+    if "dialog_articles" not in context.user_data:
+        context.user_data["dialog_articles"] = {}
+    context.user_data["dialog_articles"][article] = _parse_price_amount(price_str)
 
 
 def _last_article(context: ContextTypes.DEFAULT_TYPE) -> str | None:
@@ -371,6 +391,17 @@ async def _inactivity_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     user_data.pop("dialog_started_at", None)
 
+    dialog_articles = user_data.pop("dialog_articles", {})
+    if dialog_articles:
+        try:
+            await users.update_dialog_stats(
+                user_id,
+                list(dialog_articles.keys()),
+                sum(dialog_articles.values()),
+            )
+        except Exception:
+            logger.exception("Ошибка обновления статистики диалога для %s", user_id)
+
 
 def _schedule_inactivity_job(user, user_label: str, context: ContextTypes.DEFAULT_TYPE) -> None:
     job_name = f"inactivity_{user.id}"
@@ -600,6 +631,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             selected = exact[0]
             price_text = _format_result(selected)
             context.user_data["last_articles"] = [f"{selected['article']} — {selected['price']}"]
+            _track_article(context, selected["article"], selected["price"])
             _add_to_history(context, "user", query)
             _add_to_history(context, "assistant", price_text)
             await _reply(update, user, price_text)
@@ -654,6 +686,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 if price_item.get("eol"):
                     reply += f"\n⚠️ Товар снят с производства с {price_item['eol']}\nХотите подобрать замену?"
                 context.user_data["last_articles"] = [f"{price_item['article']} — {price_item['price']}"]
+                _track_article(context, price_item["article"], price_item["price"])
             else:
                 reply = (
                     f"✅ Склад Москва: {stock_hit['qty']} шт, поставка 2-3 дня\n"
@@ -722,6 +755,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if item:
                 price_text = _format_result(item)
                 context.user_data["last_articles"] = [f"{item['article']} — {item['price']}"]
+                _track_article(context, item["article"], item["price"])
                 _add_to_history(context, "user", query)
                 _add_to_history(context, "assistant", price_text)
                 await _reply(update, user, price_text)
@@ -772,6 +806,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             body = "\n\n".join(parts)
             reply = "Точного совпадения не нашёл. Возможно, вы имели в виду:\n\n" + body
             context.user_data["last_articles"] = [f"{r['article']} — {r['price']}" for r in results]
+            for r in results:
+                _track_article(context, r["article"], r["price"])
             _add_to_history(context, "user", query)
             _add_to_history(context, "assistant", reply)
             await _reply(update, user, reply)
@@ -811,6 +847,86 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ---------------------------------------------------------------------------
 # Manager commands
 # ---------------------------------------------------------------------------
+
+async def cmd_clients(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != MANAGER_CHAT_ID:
+        await update.message.reply_text("Эта команда недоступна.")
+        return
+    data = await users.get_all_users()
+    supplier_ids = {str(s["chat_id"]) for s in supplier_requests.load_suppliers()}
+    supplier_ids.add(str(MANAGER_CHAT_ID))
+    clients = [(uid, u) for uid, u in data.items() if uid not in supplier_ids]
+    if not clients:
+        await update.message.reply_text("Клиентов пока нет.")
+        return
+    lines = []
+    for uid, u in clients:
+        name = u.get("first_name") or "—"
+        uname = f"@{u['username']}" if u.get("username") else "—"
+        raw_date = u.get("first_seen", "")[:10]
+        try:
+            first_seen = dt.datetime.strptime(raw_date, "%Y-%m-%d").strftime("%d.%m.%Y")
+        except ValueError:
+            first_seen = raw_date
+        arts = u.get("articles", [])
+        total = u.get("total_amount", 0.0)
+        dialogs = u.get("dialogs_count", 0)
+        total_str = f"{total:,.0f}".replace(",", " ")
+        lines += [
+            f"👤 {name} ({uname})",
+            f"📅 Первый визит: {first_seen}",
+            f"📦 Запросы: {', '.join(arts[:5]) if arts else '—'}",
+            f"💰 Сумма запросов: {total_str} руб",
+            f"🔄 Диалогов: {dialogs}",
+            "———",
+        ]
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:4000] + "\n...(список обрезан)"
+    await update.message.reply_text(text)
+
+
+async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != MANAGER_CHAT_ID:
+        await update.message.reply_text("Эта команда недоступна.")
+        return
+    data = await users.get_all_users()
+    supplier_ids = {str(s["chat_id"]) for s in supplier_requests.load_suppliers()}
+    supplier_ids.add(str(MANAGER_CHAT_ID))
+    clients = [(uid, u) for uid, u in data.items() if uid not in supplier_ids]
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Клиенты"
+    ws.append(["ID", "Username", "Имя", "Первый визит", "Последний визит", "Артикулы", "Сумма запросов", "Диалогов"])
+    for uid, u in clients:
+        ws.append([
+            u.get("user_id", uid),
+            u.get("username") or "",
+            u.get("first_name") or "",
+            u.get("first_seen", "")[:10],
+            u.get("last_seen", "")[:10],
+            ", ".join(u.get("articles", [])),
+            u.get("total_amount", 0.0),
+            u.get("dialogs_count", 0),
+        ])
+    for col in ws.columns:
+        width = max(len(str(cell.value or "")) for cell in col)
+        ws.column_dimensions[get_column_letter(col[0].column)].width = min(width + 2, 60)
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    try:
+        await context.bot.send_document(
+            chat_id=MANAGER_CHAT_ID,
+            document=buf,
+            filename="clients_report.xlsx",
+            caption=f"📊 Отчёт по клиентам — {len(clients)} чел.",
+        )
+    except Exception:
+        logger.exception("Ошибка отправки отчёта")
+        await update.message.reply_text("Ошибка при формировании отчёта.")
 
 async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != MANAGER_CHAT_ID:
@@ -1031,6 +1147,8 @@ def main() -> None:
     app.add_handler(CommandHandler("price", cmd_price))
     app.add_handler(CommandHandler("suppliers", cmd_suppliers))
     app.add_handler(CommandHandler("chat", cmd_chat))
+    app.add_handler(CommandHandler("clients", cmd_clients))
+    app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(MessageHandler(filters.Regex(r"^/ask_"), handle_ask_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

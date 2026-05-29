@@ -60,3 +60,36 @@ async def set_source(user_id: int, source: str) -> None:
             with open(USERS_PATH, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             logger.info("Источник пользователя %s: %s", user_id, source)
+
+
+async def update_dialog_stats(user_id: int, articles: list, amount: float) -> None:
+    """Update articles list, total_amount and dialogs_count after dialog ends."""
+    async with _lock:
+        try:
+            with open(USERS_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            data = {}
+        uid = str(user_id)
+        if uid not in data:
+            return
+        existing = data[uid].get("articles", [])
+        for art in articles:
+            if art not in existing:
+                existing.append(art)
+        data[uid]["articles"] = existing
+        data[uid]["total_amount"] = round(data[uid].get("total_amount", 0.0) + amount, 2)
+        data[uid]["dialogs_count"] = data[uid].get("dialogs_count", 0) + 1
+        with open(USERS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.info("Диалог завершён для %s: +%s артикулов, +%.0f руб", user_id, len(articles), amount)
+
+
+async def get_all_users() -> dict:
+    """Return all users dict from users.json."""
+    async with _lock:
+        try:
+            with open(USERS_PATH, encoding="utf-8") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}

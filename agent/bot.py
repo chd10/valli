@@ -5,7 +5,7 @@ import logging
 import datetime as dt
 from anthropic import AsyncAnthropic
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
+from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, CallbackQueryHandler, ContextTypes, filters
 
 import users
 import email_sender
@@ -244,7 +244,10 @@ async def _notify_new_user(user, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Username: {label}\n"
         f"ID: {user.id}"
     )
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Написать клиенту", url=user_link)]])
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Написать клиенту", url=user_link),
+        InlineKeyboardButton("Ответить от Валли", callback_data=f"reply_{user.id}"),
+    ]])
     try:
         await context.bot.send_message(chat_id=MANAGER_CHAT_ID, text=text, reply_markup=keyboard)
     except Exception:
@@ -266,7 +269,10 @@ async def _send_manager_notification(update: Update, context: ContextTypes.DEFAU
         lines += ["", "Товар: не указан (уточните у клиента)"]
     lines += ["", f"Реквизиты: {requisites}" if requisites else "Реквизиты: не предоставлены"]
 
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Написать клиенту", url=user_link)]])
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Написать клиенту", url=user_link),
+        InlineKeyboardButton("Ответить от Валли", callback_data=f"reply_{user.id}"),
+    ]])
 
     try:
         await context.bot.send_message(
@@ -352,7 +358,10 @@ async def _inactivity_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
             f"Сообщений: {len(history)}\n\n"
             f"📝 Резюме:\n{summary}"
         )
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Написать клиенту", url=user_link)]])
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Написать клиенту", url=user_link),
+            InlineKeyboardButton("Ответить от Валли", callback_data=f"reply_{user_id}"),
+        ]])
         try:
             await context.bot.send_message(
                 chat_id=MANAGER_CHAT_ID, text=text, reply_markup=keyboard
@@ -384,6 +393,24 @@ def _schedule_inactivity_job(user, user_label: str, context: ContextTypes.DEFAUL
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
+
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    if update.effective_user.id != MANAGER_CHAT_ID:
+        return
+    data = query.data or ""
+    if data.startswith("reply_"):
+        try:
+            client_id = int(data[len("reply_"):])
+        except ValueError:
+            return
+        context.bot_data["pending_reply"] = client_id
+        await context.bot.send_message(
+            chat_id=MANAGER_CHAT_ID,
+            text=f"✏️ Введите текст сообщения для клиента (ID {client_id}):",
+        )
+
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
@@ -436,6 +463,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.exception("Ошибка пересылки ответа поставщика менеджеру")
         await update.message.reply_text("Thanks! 👍")
         return
+
+    # --- Менеджер отвечает клиенту от имени Валли ---
+    if user.id == MANAGER_CHAT_ID:
+        pending_client_id = context.bot_data.get("pending_reply")
+        if pending_client_id:
+            del context.bot_data["pending_reply"]
+            try:
+                await context.bot.send_message(chat_id=pending_client_id, text=query)
+                client_udata = context.application.user_data.get(pending_client_id)
+                if client_udata is not None:
+                    hist = client_udata.setdefault("history", [])
+                    hist.append({"role": "assistant", "content": query})
+                    if len(hist) > MAX_HISTORY * 2:
+                        client_udata["history"] = hist[-(MAX_HISTORY * 2):]
+                chat_history.append_message(pending_client_id, None, None, "out", query)
+                await update.message.reply_text("✅ Отправлено клиенту")
+            except Exception:
+                logger.exception("Ошибка отправки ответа клиенту от менеджера")
+                await update.message.reply_text("Ошибка при отправке клиенту")
+            return
 
     # --- Логирование и трекинг нового пользователя ---
     chat_history.append_message(user.id, user.username, user.first_name, "in", query)
@@ -984,6 +1031,7 @@ def main() -> None:
     app.add_handler(CommandHandler("price", cmd_price))
     app.add_handler(CommandHandler("suppliers", cmd_suppliers))
     app.add_handler(CommandHandler("chat", cmd_chat))
+    app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(MessageHandler(filters.Regex(r"^/ask_"), handle_ask_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     # 09:00 MSK = 06:00 UTC

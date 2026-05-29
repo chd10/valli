@@ -4,7 +4,9 @@
       "Bash(python3 *)",
       "Bash(pip install *)",
       "Bash(pip3 install *)",
-      "Bash(apt-get install *)"
+      "Bash(apt-get install *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
     ]
   }
 }

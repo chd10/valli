@@ -216,6 +216,10 @@ async def _reply(update: Update, user, text: str, **kwargs) -> None:
     """Send reply to user and log it to chat history file."""
     await update.message.reply_text(text, **kwargs)
     chat_history.append_message(user.id, user.username, user.first_name, "out", text)
+    try:
+        await users.mark_responded(user.id)
+    except Exception:
+        logger.exception("Ошибка mark_responded для %s", user.id)
 
 
 # ---------------------------------------------------------------------------
@@ -509,6 +513,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     if len(hist) > MAX_HISTORY * 2:
                         client_udata["history"] = hist[-(MAX_HISTORY * 2):]
                 chat_history.append_message(pending_client_id, None, None, "out", query)
+                try:
+                    await users.mark_responded(pending_client_id)
+                except Exception:
+                    logger.exception("Ошибка mark_responded (менеджер) для %s", pending_client_id)
                 await update.message.reply_text("✅ Отправлено клиенту")
             except Exception:
                 logger.exception("Ошибка отправки ответа клиенту от менеджера")
@@ -517,6 +525,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # --- Логирование и трекинг нового пользователя ---
     chat_history.append_message(user.id, user.username, user.first_name, "in", query)
+    try:
+        await users.mark_request(user.id, query)
+    except Exception:
+        logger.exception("Ошибка mark_request для %s", user.id)
     if is_new:
         await _notify_new_user(user, context)
     if not context.user_data.get("dialog_started_at"):
@@ -958,6 +970,10 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await context.bot.send_message(chat_id=req["client_chat_id"], text=reply_to_client)
         supplier_requests.close_request(request_id)
+        try:
+            await users.mark_responded(req["client_chat_id"])
+        except Exception:
+            logger.exception("Ошибка mark_responded (cmd_price) для %s", req["client_chat_id"])
         await update.message.reply_text(f"✅ Ответ отправлен клиенту {req['client_label']}")
     except Exception:
         logger.exception("Ошибка отправки ответа клиенту по заявке %s", request_id)
@@ -1100,6 +1116,59 @@ async def handle_ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # Scheduled jobs
 # ---------------------------------------------------------------------------
 
+async def _check_unanswered_clients(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Every 15 min: alert manager about clients who haven't received a reply for 60+ min."""
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    msk_hour = (now_utc.hour + 3) % 24
+    if msk_hour >= 22 or msk_hour < 9:
+        return
+
+    unresponded = await users.get_unresponded_users()
+    for u in unresponded:
+        try:
+            req_time_str = u["last_request_time"].replace("Z", "+00:00")
+            req_time = dt.datetime.fromisoformat(req_time_str)
+        except Exception:
+            continue
+        elapsed_sec = (now_utc - req_time).total_seconds()
+        if elapsed_sec < 60 * 60:
+            continue
+
+        # Repeat alert no more than once per 30 minutes
+        last_alert = u.get("last_alert_sent")
+        if last_alert:
+            try:
+                last_alert_time = dt.datetime.fromisoformat(last_alert.replace("Z", "+00:00"))
+                if (now_utc - last_alert_time).total_seconds() < 30 * 60:
+                    continue
+            except Exception:
+                pass
+
+        elapsed_min = int(elapsed_sec // 60)
+        user_id = u.get("user_id") or int(u["_uid"])
+        username = u.get("username")
+        user_label = f"@{username}" if username else (u.get("first_name") or str(user_id))
+        request_text = u.get("last_request_text", "—")
+        user_link = f"https://t.me/{username}" if username else f"tg://user?id={user_id}"
+
+        text = (
+            f"⚠️ Клиент {user_label} ждёт ответа уже {elapsed_min} мин!\n\n"
+            f"Запрос: {request_text[:300]}"
+        )
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Написать клиенту", url=user_link),
+            InlineKeyboardButton("Ответить от Валли", callback_data=f"reply_{user_id}"),
+        ]])
+        try:
+            await context.bot.send_message(
+                chat_id=MANAGER_CHAT_ID, text=text, reply_markup=keyboard
+            )
+            await users.update_last_alert(user_id)
+            logger.info("Алерт менеджеру: %s ждёт %d мин", user_label, elapsed_min)
+        except Exception:
+            logger.exception("Ошибка алерта менеджеру для %s", user_label)
+
+
 async def _send_queued_requests(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Daily job at 09:00 MSK: send overnight queued supplier requests."""
     queued = supplier_requests.get_queued()
@@ -1156,6 +1225,12 @@ def main() -> None:
     app.job_queue.run_daily(
         _send_queued_requests,
         time=dt.time(6, 0, 0, tzinfo=dt.timezone.utc),
+    )
+    # Каждые 15 минут: проверка неотвеченных клиентов (алерт менеджеру если >60 мин)
+    app.job_queue.run_repeating(
+        _check_unanswered_clients,
+        interval=15 * 60,
+        first=15 * 60,
     )
     logger.info("Бот Валли запущен")
     app.run_polling()

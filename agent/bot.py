@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 import signal
@@ -221,6 +222,60 @@ async def _reply(update: Update, user, text: str, **kwargs) -> None:
         await users.mark_responded(user.id)
     except Exception:
         logger.exception("Ошибка mark_responded для %s", user.id)
+
+
+async def _typing_indicator(update: Update, context, stop_event: asyncio.Event, messages: list[str] = None):
+    """Показывает typing... и статусные сообщения пока идёт задача."""
+    if messages is None:
+        messages = ["🔍 Ищу...", "⏳ Обрабатываю...", "📊 Формирую ответ..."]
+    chat_id = update.effective_chat.id
+    status_msg = None
+    try:
+        status_msg = await context.bot.send_message(chat_id=chat_id, text=messages[0])
+        msg_index = 0
+        while not stop_event.is_set():
+            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+            await asyncio.sleep(4)
+            if stop_event.is_set():
+                break
+            msg_index = (msg_index + 1) % len(messages)
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=status_msg.message_id,
+                    text=messages[msg_index]
+                )
+            except Exception:
+                pass
+    finally:
+        if status_msg:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except Exception:
+                pass
+
+
+async def _ask_claude_with_progress(query: str, update: Update, context, extra_instruction=None):
+    """Вызывает _ask_claude с индикатором прогресса."""
+    stop_event = asyncio.Event()
+    indicator = asyncio.create_task(
+        _typing_indicator(update, context, stop_event, [
+            "🤔 Думаю...",
+            "📡 Консультируюсь с базой...",
+            "✍️ Формирую ответ..."
+        ])
+    )
+    try:
+        result = await _ask_claude(query, context, extra_instruction=extra_instruction)
+        return result
+    finally:
+        stop_event.set()
+        await asyncio.sleep(0.3)
+        indicator.cancel()
+        try:
+            await indicator
+        except asyncio.CancelledError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -466,7 +521,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         reply = "Здравствуйте! Вижу вы пришли из нашей рассылки. Напишите артикул оборудования — найду цену и наличие."
         _add_to_history(context, "assistant", reply)
     else:
-        reply = await _ask_claude("Поздоровайся и кратко расскажи, чем можешь помочь.", context)
+        reply = await _ask_claude_with_progress("Поздоровайся и кратко расскажи, чем можешь помочь.", update, context)
     await _reply(update, user, reply + _CONFIDENTIALITY_NOTE)
     _schedule_inactivity_job(user, user_label, context)
 
@@ -566,8 +621,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await _reply(update, user, reply)
                 _schedule_inactivity_job(user, user_label, context)
                 return
-            reply = await _ask_claude(
+            reply = await _ask_claude_with_progress(
                 query,
+                update,
                 context,
                 extra_instruction=(
                     f"Клиент только что получил цену на артикул {article} "
@@ -612,8 +668,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if _is_purchase_intent(query):
         context.user_data.pop("valli_state", None)
         if not context.user_data.get("requisites"):
-            reply = await _ask_claude(
-                query, context,
+            reply = await _ask_claude_with_progress(
+                query, update, context,
                 extra_instruction=(
                     "Клиент выразил готовность к покупке. "
                     "Вежливо попроси реквизиты компании: название, ИНН и контактное лицо — "
@@ -666,6 +722,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # --- Поиск по артикулу ---
     if _looks_like_article(query):
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
         # Check stock first — immediate availability beats price search
         stock_hit = stock_search.search_stock(query)
         if stock_hit:
@@ -780,7 +837,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 _mode = "awaiting_replacement" if item.get("eol") else "awaiting_details"
                 context.user_data["valli_state"] = {"mode": _mode, "article": item["article"]}
             else:
-                reply = await _ask_claude(query, context)
+                reply = await _ask_claude_with_progress(query, update, context)
                 await _reply(update, user, reply)
             _schedule_inactivity_job(user, user_label, context)
             return
@@ -828,8 +885,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             _schedule_inactivity_job(user, user_label, context)
             return
 
-        reply = await _ask_claude(
-            query, context,
+        reply = await _ask_claude_with_progress(
+            query, update, context,
             extra_instruction=(
                 f"Клиент спросил артикул «{query}», но его нет в нашем прайсе. "
                 "Скажи, что уточнишь у поставщика и вернёшься с ответом. "
@@ -851,7 +908,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await _reply(update, user, reply)
                 _schedule_inactivity_job(user, user_label, context)
                 return
-        reply = await _ask_claude(query, context)
+        reply = await _ask_claude_with_progress(query, update, context)
 
     await _reply(update, user, reply)
     _schedule_inactivity_job(user, user_label, context)

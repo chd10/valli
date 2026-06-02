@@ -113,9 +113,12 @@ def _format_result(item: dict, offer_replacement: bool = True) -> str:
     if item.get("is_used"):
         text += "\n♻️ Б/У товар"
     if item.get("stale"):
-        text += "\n⚠️ Цена устаревшая — запрошу актуальную у поставщиков."
-    if item.get("updated"):
-        text += f"\n🗓 Цена обновлена: {item['updated']}"
+        if item.get("updated"):
+            text += f"\n⚠️ Цена устаревшая (обновлена: {item['updated']}) — запрошу актуальную у поставщиков."
+        else:
+            text += "\n⚠️ Цена устаревшая — запрошу актуальную у поставщиков."
+    elif item.get("updated"):
+        text += f"\n🗓 Цена актуальна на: {item['updated']}"
     if item.get("eol"):
         text += f"\n⚠️ Товар снят с производства с {item['eol']}"
         if offer_replacement:
@@ -750,9 +753,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 if price_item.get("is_used"):
                     reply += "\n♻️ Б/У товар"
                 if price_item.get("stale"):
-                    reply += "\n⚠️ Цена устаревшая — запрошу актуальную у поставщиков."
-                if price_item.get("updated"):
-                    reply += f"\n🗓 Цена обновлена: {price_item['updated']}"
+                    if price_item.get("updated"):
+                        reply += f"\n⚠️ Цена устаревшая (обновлена: {price_item['updated']}) — запрошу актуальную у поставщиков."
+                    else:
+                        reply += "\n⚠️ Цена устаревшая — запрошу актуальную у поставщиков."
+                elif price_item.get("updated"):
+                    reply += f"\n🗓 Цена актуальна на: {price_item['updated']}"
                 if price_item.get("eol"):
                     reply += f"\n⚠️ Товар снят с производства с {price_item['eol']}\nХотите подобрать замену?"
                 context.user_data["last_articles"] = [f"{price_item['article']} — {price_item['price']}"]

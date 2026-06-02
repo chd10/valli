@@ -159,7 +159,16 @@ def _load() -> pd.DataFrame:
 
         df["article_lower"] = df["article"].str.lower()
         df["article_norm"] = df["article_lower"].apply(_normalize)
-        df["stale"] = df["comment"].apply(_is_stale)
+        def _stale_row(row):
+            if row["updated"]:
+                try:
+                    from datetime import datetime
+                    d = datetime.strptime(row["updated"], "%d.%m.%Y").date()
+                    return d < _stale_cutoff()
+                except ValueError:
+                    pass
+            return _is_stale(row["comment"])
+        df["stale"] = df.apply(_stale_row, axis=1)
 
         has_price = df["price"].apply(_has_nonzero_price)
         _df_noprice = df[~has_price].reset_index(drop=True)

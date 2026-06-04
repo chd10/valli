@@ -139,9 +139,7 @@ _SUPPLIER_REQUEST_TEXT = (
     "Part Number: {article}\n"
     "Condition: new\n"
     "Quantity: 1 pcs\n\n"
-    "Please reply with:\n"
-    "PRICE: [amount] USD/RMB\n"
-    "LEAD TIME: [days/weeks]"
+    "Please reply with price and lead time."
 )
 
 

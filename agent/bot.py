@@ -930,10 +930,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 _mode = "awaiting_replacement" if item.get("eol") else "awaiting_details"
                 context.user_data["valli_state"] = {"mode": _mode, "article": item["article"]}
             else:
-                reply = "Артикул не найден в прайсе. Уточните артикул или отправьте запрос поставщику."
+                article = candidates[0]["article"]
+                reply = "Артикул не найден в прайсе — запрошу цену у поставщика, отвечу позже."
                 _add_to_history(context, "user", query)
                 _add_to_history(context, "assistant", reply)
                 await _reply(update, user, reply)
+                await _request_supplier_price(article, user, user_label, context)
             _schedule_inactivity_job(user, user_label, context)
             return
 
@@ -980,9 +982,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             _schedule_inactivity_job(user, user_label, context)
             return
 
-        reply = "Артикул не найден в прайсе. Уточните артикул или отправьте запрос поставщику."
+        reply = "Артикул не найден в прайсе — запрошу цену у поставщика, отвечу позже."
         _add_to_history(context, "user", query)
         _add_to_history(context, "assistant", reply)
+        await _reply(update, user, reply)
+        await _request_supplier_price(query, user, user_label, context)
+        _schedule_inactivity_job(user, user_label, context)
+        return
     else:
         if re.search(_STALE_TRIGGER_RE, query):
             article = _last_article(context)

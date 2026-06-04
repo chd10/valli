@@ -60,6 +60,8 @@ SYSTEM_PROMPT = """Ты — Валли, робот-консультант ком
 Запрещено: никогда не выдумывай характеристики, параметры, цены или наличие оборудования из своих знаний. Если артикул не найден в прайсе — только сообщи об этом и предложи запрос поставщику. Не перечисляй артикулы из своей базы знаний."""
 
 _ARTICLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-_/\\.+\s]{1,60}$")
+# Extracts article-like tokens from free-form text (e.g. "нужна цена на WS-C3750X-24T-S")
+_ARTICLE_TOKEN_RE = re.compile(r'[A-Za-z][A-Za-z0-9\-_/\\.+]{3,}')
 
 _PURCHASE_RE = re.compile(
     r"\b(да\b|согласен|согласна|оформляем|оформить|выставите?\s+счёт|выставьте\s+счёт|"
@@ -92,6 +94,16 @@ _CONFIDENTIALITY_NOTE = (
 
 def _user_label(user) -> str:
     return f"@{user.username}" if user.username else user.first_name
+
+
+def _extract_article_token(text: str) -> str | None:
+    """Find the most article-like token in a free-form message."""
+    tokens = _ARTICLE_TOKEN_RE.findall(text)
+    # Prefer tokens with both letters and digits (typical part-number format)
+    for t in tokens:
+        if re.search(r'\d', t) and re.search(r'[A-Za-z]', t):
+            return t
+    return tokens[0] if len(tokens) == 1 else None
 
 
 def _looks_like_article(text: str) -> bool:
@@ -1005,6 +1017,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 _schedule_inactivity_job(user, user_label, context)
                 return
         reply = await _ask_claude_with_progress(query, update, context)
+        await _reply(update, user, reply)
+        _add_to_history(context, "user", query)
+        _add_to_history(context, "assistant", reply)
+        # After Claude responds — check if query contains an article not in price list
+        article_token = _extract_article_token(query)
+        if article_token and not search_containing(article_token):
+            await _request_supplier_price(article_token, user, user_label, context)
+        _schedule_inactivity_job(user, user_label, context)
+        return
 
     await _reply(update, user, reply)
     _schedule_inactivity_job(user, user_label, context)

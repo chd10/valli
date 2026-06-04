@@ -4,6 +4,7 @@ import re
 import signal
 import logging
 import datetime as dt
+import urllib.parse
 from io import BytesIO
 import openpyxl
 from openpyxl.utils import get_column_letter
@@ -182,23 +183,21 @@ async def _request_supplier_price(
         return None
     req = supplier_requests.create_request(article, user.id, user_label, status="pending_selection")
     suppliers = supplier_requests.load_suppliers()
-    lines = [
-        "🔍 Новый запрос цены",
-        "",
-        f"Артикул: {article}",
-        f"Клиент: {user_label}",
-        "",
-        "Выберите поставщиков для запроса:",
-        f"/ask_all {req['id']} — отправить всем",
-    ]
+    buttons = [[InlineKeyboardButton("Написать всем", callback_data=f"ask_all:{req['id']}")]]
     for s in suppliers:
-        lines.append(f"/ask_{s['id']} {req['id']} — только {s['name']}")
-    for i in range(len(suppliers)):
-        for j in range(i + 1, len(suppliers)):
-            si, sj = suppliers[i], suppliers[j]
-            lines.append(f"/ask_{si['id']}_{sj['id']} {req['id']} — {si['name']} и {sj['name']}")
+        buttons.append([InlineKeyboardButton(s["name"], callback_data=f"ask_one:{s['id']}:{req['id']}")])
+    text = (
+        "🔍 Новый запрос цены\n\n"
+        f"Артикул: {article}\n"
+        f"Клиент: {user_label}\n\n"
+        "Выберите поставщиков:"
+    )
     try:
-        await context.bot.send_message(chat_id=MANAGER_CHAT_ID, text="\n".join(lines))
+        await context.bot.send_message(
+            chat_id=MANAGER_CHAT_ID,
+            text=text,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
     except Exception:
         logger.exception("Ошибка уведомления менеджера о выборе поставщика")
     return req["id"]
@@ -488,6 +487,56 @@ def _schedule_inactivity_job(user, user_label: str, context: ContextTypes.DEFAUL
 # Handlers
 # ---------------------------------------------------------------------------
 
+async def _handle_ask_callback(query, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
+    if data.startswith("ask_all:"):
+        req_id = int(data.split(":")[1])
+        selected_ids = None
+    else:
+        _, sid, rid = data.split(":")
+        req_id, selected_ids = int(rid), [int(sid)]
+
+    req = supplier_requests.get_request(req_id)
+    if not req:
+        await query.edit_message_text("❌ Заявка не найдена", reply_markup=None)
+        return
+    if req["status"] != "pending_selection":
+        await query.edit_message_text(
+            f"{query.message.text}\n\n⚠️ Уже обработана (статус: {req['status']})",
+            reply_markup=None,
+        )
+        return
+
+    all_suppliers = supplier_requests.load_suppliers()
+    supplier_map = {s["id"]: s for s in all_suppliers}
+    if selected_ids is None:
+        selected_ids = [s["id"] for s in all_suppliers]
+    selected_suppliers = [supplier_map[sid] for sid in selected_ids if sid in supplier_map]
+    if not selected_suppliers:
+        await query.edit_message_text("❌ Поставщики не найдены", reply_markup=None)
+        return
+
+    msg_text = _SUPPLIER_REQUEST_TEXT.format(article=req["article"])
+    encoded_text = urllib.parse.quote(msg_text)
+
+    url_buttons = []
+    for s in selected_suppliers:
+        username = s.get("username")
+        if username:
+            url = f"https://t.me/{username}?text={encoded_text}"
+        else:
+            url = f"tg://user?id={s['chat_id']}"
+        url_buttons.append([InlineKeyboardButton(s["name"], url=url)])
+
+    supplier_requests.set_selected_suppliers(req_id, selected_ids, queued=False)
+
+    new_text = f"{query.message.text}\n\n📤 Откройте чат и отправьте запрос:"
+
+    try:
+        await query.edit_message_text(new_text, reply_markup=InlineKeyboardMarkup(url_buttons))
+    except Exception:
+        logger.exception("Ошибка редактирования сообщения ask callback")
+
+
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -504,6 +553,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             chat_id=MANAGER_CHAT_ID,
             text=f"✏️ Введите текст сообщения для клиента (ID {client_id}):",
         )
+    elif data.startswith("ask_all:") or data.startswith("ask_one:"):
+        await _handle_ask_callback(query, context, data)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1101,82 +1152,6 @@ async def cmd_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Manager: /ask_* supplier selection
-# ---------------------------------------------------------------------------
-
-async def handle_ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user.id != MANAGER_CHAT_ID:
-        await update.message.reply_text("Эта команда недоступна.")
-        return
-    parts = update.message.text.strip().split()
-    if len(parts) < 2:
-        await update.message.reply_text("Формат: /ask_all <id>  или  /ask_1_2 <id>")
-        return
-    command = parts[0].lstrip("/")  # e.g. "ask_all" or "ask_1_2"
-    try:
-        request_id = int(parts[1])
-    except ValueError:
-        await update.message.reply_text("Неверный ID заявки")
-        return
-
-    req = supplier_requests.get_request(request_id)
-    if not req:
-        await update.message.reply_text(f"Заявка #{request_id} не найдена")
-        return
-    if req["status"] != "pending_selection":
-        await update.message.reply_text(
-            f"Заявка #{request_id} уже обработана (статус: {req['status']})"
-        )
-        return
-
-    all_suppliers = supplier_requests.load_suppliers()
-    supplier_map = {s["id"]: s for s in all_suppliers}
-
-    if command == "ask_all":
-        selected_ids = [s["id"] for s in all_suppliers]
-    else:
-        id_parts = command[4:].split("_")  # strip "ask_", split remaining
-        try:
-            selected_ids = [int(x) for x in id_parts]
-        except ValueError:
-            await update.message.reply_text("Неверный формат команды")
-            return
-
-    selected_suppliers = [supplier_map[sid] for sid in selected_ids if sid in supplier_map]
-    if not selected_suppliers:
-        await update.message.reply_text("Поставщики не найдены")
-        return
-
-    working = supplier_requests.is_working_hours()
-    supplier_requests.set_selected_suppliers(request_id, selected_ids, queued=not working)
-
-    if working:
-        text = _SUPPLIER_REQUEST_TEXT.format(article=req["article"])
-        for s in selected_suppliers:
-            try:
-                await context.bot.send_message(chat_id=s["chat_id"], text=text)
-            except Exception:
-                logger.exception("Ошибка отправки запроса поставщику %s", s["name"])
-        names = ", ".join(s["name"] for s in selected_suppliers)
-        await update.message.reply_text(f"✅ Запрос отправлен: {names}")
-        client_msg = (
-            f"Отправил запрос поставщикам по артикулу {req['article']} — "
-            f"отвечу в течение рабочего дня."
-        )
-    else:
-        names = ", ".join(s["name"] for s in selected_suppliers)
-        await update.message.reply_text(f"⏰ Запрос отправлю в 09:00 МСК: {names}")
-        client_msg = (
-            f"Запрос поставщикам по артикулу {req['article']} отправлю в 09:00 МСК — "
-            f"ответ ожидается в течение рабочего дня."
-        )
-    try:
-        await context.bot.send_message(chat_id=req["client_chat_id"], text=client_msg)
-    except Exception:
-        logger.exception("Ошибка уведомления клиента после выбора поставщика")
-
-
-# ---------------------------------------------------------------------------
 # Scheduled jobs
 # ---------------------------------------------------------------------------
 
@@ -1283,7 +1258,6 @@ def main() -> None:
     app.add_handler(CommandHandler("clients", cmd_clients))
     app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CallbackQueryHandler(handle_callback_query))
-    app.add_handler(MessageHandler(filters.Regex(r"^/ask_"), handle_ask_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     # 09:00 MSK = 06:00 UTC
     app.job_queue.run_daily(

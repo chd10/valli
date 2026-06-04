@@ -514,25 +514,57 @@ async def _handle_ask_callback(query, context: ContextTypes.DEFAULT_TYPE, data: 
         return
 
     msg_text = _SUPPLIER_REQUEST_TEXT.format(article=req["article"])
-    encoded_text = urllib.parse.quote(msg_text)
-
-    url_buttons = []
-    for s in selected_suppliers:
-        username = s.get("username")
-        if username:
-            url = f"https://t.me/{username}?text={encoded_text}"
-        else:
-            url = f"tg://user?id={s['chat_id']}"
-        url_buttons.append([InlineKeyboardButton(s["name"], url=url)])
-
     supplier_requests.set_selected_suppliers(req_id, selected_ids, queued=False)
 
-    new_text = f"{query.message.text}\n\n📤 Откройте чат и отправьте запрос:"
+    for s in selected_suppliers:
+        preview_text = (
+            f"📤 Письмо для {s['name']}:\n\n"
+            f"{msg_text}"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(f"✅ Отправить {s['name']}", callback_data=f"confirm_ask:{req_id}:{s['id']}"),
+                InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_ask:{req_id}:{s['id']}"),
+            ]
+        ])
+        try:
+            await context.bot.send_message(chat_id=MANAGER_CHAT_ID, text=preview_text, reply_markup=keyboard)
+        except Exception:
+            logger.exception("Ошибка отправки превью письма поставщику %s", s["name"])
 
     try:
-        await query.edit_message_text(new_text, reply_markup=InlineKeyboardMarkup(url_buttons))
+        await query.edit_message_text(query.message.text, reply_markup=None)
     except Exception:
-        logger.exception("Ошибка редактирования сообщения ask callback")
+        pass
+
+
+async def _handle_confirm_ask_callback(query, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
+    parts = data.split(":")
+    req_id, supplier_id = int(parts[1]), int(parts[2])
+
+    req = supplier_requests.get_request(req_id)
+    if not req:
+        await query.edit_message_text("❌ Заявка не найдена", reply_markup=None)
+        return
+
+    all_suppliers = supplier_requests.load_suppliers()
+    supplier_map = {s["id"]: s for s in all_suppliers}
+    supplier = supplier_map.get(supplier_id)
+    if not supplier:
+        await query.edit_message_text("❌ Поставщик не найден", reply_markup=None)
+        return
+
+    msg_text = _SUPPLIER_REQUEST_TEXT.format(article=req["article"])
+    try:
+        await context.bot.send_message(chat_id=supplier["chat_id"], text=msg_text)
+        await query.edit_message_text(
+            f"✅ Отправлено {supplier['name']}:\n\n{msg_text}",
+            reply_markup=None,
+        )
+        supplier_requests.mark_pending(req_id)
+    except Exception:
+        logger.exception("Ошибка отправки запроса поставщику %s", supplier["name"])
+        await query.edit_message_text(f"❌ Ошибка отправки {supplier['name']}", reply_markup=None)
 
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -553,6 +585,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         )
     elif data.startswith("ask_all:") or data.startswith("ask_one:"):
         await _handle_ask_callback(query, context, data)
+    elif data.startswith("confirm_ask:"):
+        await _handle_confirm_ask_callback(query, context, data)
+    elif data.startswith("cancel_ask:"):
+        await query.edit_message_text("❌ Отменено", reply_markup=None)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

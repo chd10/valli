@@ -55,7 +55,9 @@ SYSTEM_PROMPT = """Ты — Валли, робот-консультант ком
 
 Конфиденциальность: если клиент спрашивает о конфиденциальности или выражает сомнения насчёт передачи данных — заверь его, что все запросы конфиденциальны, данные не передаются третьим лицам и используются исключительно для подбора оборудования.
 
-Важно: отвечай только на русском языке, кратко и по делу."""
+Важно: отвечай только на русском языке, кратко и по делу.
+
+Запрещено: никогда не выдумывай характеристики, параметры, цены или наличие оборудования из своих знаний. Если артикул не найден в прайсе — только сообщи об этом и предложи запрос поставщику. Не перечисляй артикулы из своей базы знаний."""
 
 _ARTICLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-_/\\.+\s]{1,60}$")
 
@@ -928,7 +930,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 _mode = "awaiting_replacement" if item.get("eol") else "awaiting_details"
                 context.user_data["valli_state"] = {"mode": _mode, "article": item["article"]}
             else:
-                reply = await _ask_claude_with_progress(query, update, context)
+                reply = "Артикул не найден в прайсе. Уточните артикул или отправьте запрос поставщику."
+                _add_to_history(context, "user", query)
+                _add_to_history(context, "assistant", reply)
                 await _reply(update, user, reply)
             _schedule_inactivity_job(user, user_label, context)
             return
@@ -976,14 +980,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             _schedule_inactivity_job(user, user_label, context)
             return
 
-        reply = await _ask_claude_with_progress(
-            query, update, context,
-            extra_instruction=(
-                f"Клиент спросил артикул «{query}», но его нет в нашем прайсе. "
-                "Скажи, что уточнишь у поставщика и вернёшься с ответом. "
-                "Кратко, дружелюбно, в своём стиле."
-            ),
-        )
+        reply = "Артикул не найден в прайсе. Уточните артикул или отправьте запрос поставщику."
+        _add_to_history(context, "user", query)
+        _add_to_history(context, "assistant", reply)
     else:
         if re.search(_STALE_TRIGGER_RE, query):
             article = _last_article(context)

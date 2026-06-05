@@ -139,6 +139,14 @@ def get_sent_to_suppliers() -> list[dict]:
     return [r for r in load_pending() if r["status"] == "pending"]
 
 
+def get_sent_to_supplier(supplier_id: int) -> list[dict]:
+    """Requests sent to a specific supplier (status=pending, supplier in selected list)."""
+    return [
+        r for r in load_pending()
+        if r["status"] == "pending" and supplier_id in r.get("selected_supplier_ids", [])
+    ]
+
+
 def get_queued() -> list[dict]:
     """Requests queued for 09:00 MSK send."""
     return [r for r in load_pending() if r["status"] == "queued"]

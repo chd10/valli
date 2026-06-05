@@ -642,14 +642,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # --- Сообщение от поставщика ---
     supplier = supplier_requests.get_supplier_by_chat_id(user.id)
     if supplier:
-        sent_reqs = supplier_requests.get_sent_to_suppliers()
+        sent_reqs = supplier_requests.get_sent_to_supplier(supplier["id"])
         lines = [f"📨 Reply from {supplier['name']}:", "", query]
         if sent_reqs:
-            lines += ["", "Клиент ожидает ответа", "", "Открытые заявки:"]
-            for r in sent_reqs:
-                lines.append(
-                    f"  /price {r['id']} <цена> <срок>  —  {r['article']}  ({r['client_label']})"
-                )
+            r = sent_reqs[0]
+            lines += [
+                "",
+                f"Заявка: {r['article']}  ({r['client_label']})",
+                f"  /price {r['id']} <цена> <срок>",
+            ]
         try:
             await context.bot.send_message(chat_id=MANAGER_CHAT_ID, text="\n".join(lines))
         except Exception:

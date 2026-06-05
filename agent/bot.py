@@ -117,12 +117,19 @@ def _looks_like_article(text: str) -> bool:
 def _extract_articles(text: str) -> list[str]:
     """Extract individual article numbers from a multi-line message."""
     articles = []
+    seen = set()
     for line in text.splitlines():
         line = line.strip()
-        line = re.sub(r'^[\d]+[.)]\s*|^[-*•]\s*', '', line)
-        token = line.split()[0] if line.split() else ''
-        if token and _looks_like_article(token):
-            articles.append(token)
+        if not line:
+            continue
+        line_clean = re.sub(r'\*+', ' ', line)
+        line_clean = re.sub(r'^[\d]+[.)]\s*|^[-*•]\s*', '', line_clean)
+        for token in line_clean.split():
+            token = token.strip('.,;:()')
+            if token and token not in seen and _looks_like_article(token):
+                articles.append(token)
+                seen.add(token)
+                break
     return articles
 
 

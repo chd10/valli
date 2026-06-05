@@ -114,6 +114,18 @@ def _looks_like_article(text: str) -> bool:
     return bool(_ARTICLE_RE.match(text)) and bool(re.search(r"\d", text) or re.search(r"[A-Za-z]{2,}", text))
 
 
+def _extract_articles(text: str) -> list[str]:
+    """Extract individual article numbers from a multi-line message."""
+    articles = []
+    for line in text.splitlines():
+        line = line.strip()
+        line = re.sub(r'^[\d]+[.)]\s*|^[-*•]\s*', '', line)
+        token = line.split()[0] if line.split() else ''
+        if token and _looks_like_article(token):
+            articles.append(token)
+    return articles
+
+
 def _is_purchase_intent(text: str) -> bool:
     return bool(_PURCHASE_RE.search(text))
 
@@ -820,6 +832,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             _add_to_history(context, "user", query)
             _add_to_history(context, "assistant", reply)
             await _reply(update, user, reply)
+        _schedule_inactivity_job(user, user_label, context)
+        return
+
+    # --- Несколько артикулов в одном сообщении ---
+    articles = _extract_articles(query)
+    if len(articles) > 1:
+        reply = "Принял ваш запрос! Отправляю запрос поставщикам по каждой позиции."
+        _add_to_history(context, "user", query)
+        _add_to_history(context, "assistant", reply)
+        await _reply(update, user, reply)
+        for article in articles:
+            await _request_supplier_price(article, user, user_label, context)
         _schedule_inactivity_job(user, user_label, context)
         return
 

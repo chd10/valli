@@ -981,17 +981,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 _schedule_inactivity_job(user, user_label, context)
                 return
 
-            # Fuzzy fallback — show with prices (no replacement offer for fuzzy)
-            parts = [_format_result(item, offer_replacement=False) for item in results]
-            body = "\n\n".join(parts)
-            reply = "Точного совпадения не нашёл. Возможно, вы имели в виду:\n\n" + body
-            context.user_data["last_articles"] = [f"{r['article']} — {r['price']}" for r in results]
-            for r in results:
-                _track_article(context, r["article"], r["price"])
+            # Fuzzy fallback — request supplier price instead of guessing
+            reply = "Артикул не найден в прайсе — запрошу цену у поставщика, отвечу позже."
             _add_to_history(context, "user", query)
             _add_to_history(context, "assistant", reply)
             await _reply(update, user, reply)
-            context.user_data["valli_state"] = {"mode": "awaiting_details", "article": first["article"]}
+            await _request_supplier_price(query, user, user_label, context)
             _schedule_inactivity_job(user, user_label, context)
             return
 

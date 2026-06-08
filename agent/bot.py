@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import re
 import signal
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ["TG_BOT_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 MANAGER_CHAT_ID = int(os.environ["MANAGER_CHAT_ID"])
+_EMAIL_ATTRIBUTION_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "email_attribution.jsonl")
 
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -635,6 +637,27 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         job.schedule_removal()
     start_param = context.args[0] if context.args else None
     chat_history.append_message(user.id, user.username, user.first_name, "in", f"/start {start_param or ''}".strip())
+    if start_param:
+        try:
+            record = {
+                "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "tg_user_id": user.id,
+                "tg_username": user.username,
+                "tg_name": f"{user.first_name or ''} {user.last_name or ''}".strip(),
+                "payload": start_param,
+            }
+            with open(_EMAIL_ATTRIBUTION_PATH, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception:
+            logger.exception("Ошибка записи email_attribution.jsonl")
+        try:
+            uname = f"@{user.username}" if user.username else str(user.id)
+            await context.bot.send_message(
+                chat_id=MANAGER_CHAT_ID,
+                text=f"🎯 Переход из рассылки: токен={start_param}, {uname} (id {user.id})",
+            )
+        except Exception:
+            logger.exception("Ошибка уведомления менеджера об email-атрибуции")
     if is_new:
         await _notify_new_user(user, context)
     if start_param == "email_utm":
